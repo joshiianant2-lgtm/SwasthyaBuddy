@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SwasthyaBuddy</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+  <div class="container">
+    <div class="header">
+      <h1>🩺 SwasthyaBuddy</h1>
+      <p>Select your symptoms and we'll predict the possible disease</p>
+    </div>
+
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="🔍 Search symptoms..." onkeyup="filterSymptoms()"/>
+    </div>
+
+    <div class="selected-box" id="selectedBox">
+      <p id="noSelected">No symptoms selected yet</p>
+    </div>
+
+    <div class="symptoms-grid" id="symptomsGrid">
+      {% for symptom in symptoms %}
+      <div class="symptom-chip" onclick="toggleSymptom(this)" data-symptom="{{ symptom }}">
+        {{ symptom.replace('_', ' ').title() }}
+      </div>
+      {% endfor %}
+    </div>
+
+    <button class="predict-btn" onclick="predict()">🔬 Predict Disease</button>
+
+    <div class="result-box" id="resultBox" style="display:none;">
+      <h2>📋 Result</h2>
+      <div class="disease-name" id="diseaseName"></div>
+      <div class="confidence" id="confidence"></div>
+
+      <div class="chart-box">
+        <h3>📊 Top 5 Possible Diseases</h3>
+        <canvas id="confidenceChart"></canvas>
+      </div>
+
+      <div class="precautions">
+        <h3>⚠️ Precautions</h3>
+        <ul id="precautionsList"></ul>
+      </div>
+
+      <p class="disclaimer">⚕️ This is not a substitute for professional medical advice. Please consult a doctor.</p>
+    </div>
+  </div>
+
+  <script>
+    let selectedSymptoms = [];
+
+    function toggleSymptom(el) {
+      const symptom = el.dataset.symptom;
+      if (el.classList.contains('active')) {
+        el.classList.remove('active');
+        selectedSymptoms = selectedSymptoms.filter(s => s !== symptom);
+      } else {
+        el.classList.add('active');
+        selectedSymptoms.push(symptom);
+      }
+      updateSelectedBox();
+    }
+
+    function updateSelectedBox() {
+      const box = document.getElementById('selectedBox');
+      box.innerHTML = '';
+      if (selectedSymptoms.length === 0) {
+        box.innerHTML = '<p id="noSelected">No symptoms selected yet</p>';
+      } else {
+        selectedSymptoms.forEach(s => {
+          const tag = document.createElement('span');
+          tag.className = 'selected-tag';
+          tag.textContent = s.replace(/_/g, ' ');
+          box.appendChild(tag);
+        });
+      }
+    }
+
+    function filterSymptoms() {
+      const query = document.getElementById('searchInput').value.toLowerCase();
+      document.querySelectorAll('.symptom-chip').forEach(chip => {
+        chip.style.display = chip.textContent.toLowerCase().includes(query) ? '' : 'none';
+      });
+    }
+
+    async function predict() {
+      if (selectedSymptoms.length === 0) {
+        alert('Please select at least one symptom!');
+        return;
+      }
+
+      const btn = document.querySelector('.predict-btn');
+      btn.textContent = '⏳ Predicting...';
+      btn.disabled = true;
+
+      const res = await fetch('/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symptoms: selectedSymptoms })
+      });
+      const data = await res.json();
+
+      btn.textContent = '🔬 Predict Disease';
+      btn.disabled = false;
+
+      document.getElementById('diseaseName').textContent = data.disease;
+      document.getElementById('confidence').textContent = `Confidence: ${data.confidence}%`;
+
+      const list = document.getElementById('precautionsList');
+      list.innerHTML = '';
+      data.precautions.forEach(p => {
+        const li = document.createElement('li');
+        li.textContent = p;
+        list.appendChild(li);
+      });
+
+      document.getElementById('resultBox').style.display = 'block';
+      document.getElementById('resultBox').scrollIntoView({ behavior: 'smooth' });
+
+      // Draw chart
+      const ctx = document.getElementById('confidenceChart').getContext('2d');
+      if (window.myChart) window.myChart.destroy();
+      window.myChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: data.top5.map(d => d.disease),
+          datasets: [{
+            label: 'Confidence %',
+            data: data.top5.map(d => d.probability),
+            backgroundColor: ['#1a56db', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe'],
+            borderRadius: 8,
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              beginAtZero: true,
+              max: 100,
+              ticks: { callback: val => val + '%' }
+            }
+          }
+        }
+      });
+    }
+  </script>
+
+</body>
+</html>
