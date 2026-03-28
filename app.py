@@ -109,10 +109,22 @@ FALLBACK_PREDICTIONS = [
 
 def symptoms_to_vector(symptom_string):
     user_symptoms = [s.strip().lower() for s in symptom_string.split(",") if s.strip()]
+    
+    print("User symptoms:", user_symptoms)  # debug
+    
     vector = np.zeros(len(symptoms), dtype=int)
+    matched = []
+
     for i, symptom_col in enumerate(symptoms):
         if symptom_col.strip().lower() in user_symptoms:
             vector[i] = 1
+            matched.append(symptom_col)
+
+    print("Matched symptoms:", matched)  # debug
+
+    if sum(vector) == 0:
+        raise ValueError("No valid symptoms matched dataset")
+
     return vector.reshape(1, -1)
 
 
@@ -209,7 +221,13 @@ def predict():
                 "predictions": FALLBACK_PREDICTIONS
             }), 400
 
-        symptom_string = data.get("symptoms", "").strip()
+        symptoms_input = data.get("symptoms", "")
+
+# Convert list → string (FIX)
+        if isinstance(symptoms_input, list):
+            symptom_string = ",".join(symptoms_input)
+        else:
+            symptom_string = str(symptoms_input).strip()
         if not symptom_string:
             return jsonify({
                 "status":      "error",
