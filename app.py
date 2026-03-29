@@ -1,13 +1,12 @@
 """
-SwasthyaBuddy - Flask ML Prediction API
-Matches Akshat's original file structure:
+SwasthyaBuddy - Flask ML Prediction API (Updated)
+New artifacts:
   model/model.pkl
   model/encoder.pkl
-  model/symptoms.json   (loaded as sorted list)
+  model/selector.pkl      ← NEW
+  model/symptoms.json
   model/diseases.json
-
-POST /predict  → top 3 disease predictions
-GET  /health   → liveness check
+  model/severity.json     ← NEW
 """
 
 import os
@@ -23,30 +22,33 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)   # Required — Java backend calls this from a different origin
+CORS(app)
 
-# ── Load artifacts (same paths Akshat used) ────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ── Load artifacts ─────────────────────────────────────────────────────────────
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 
 try:
-    model    = pickle.load(open(os.path.join(MODEL_DIR, "model.pkl"),   "rb"))
-    encoder  = pickle.load(open(os.path.join(MODEL_DIR, "encoder.pkl"), "rb"))
-    symptoms = sorted(json.load(open(os.path.join(MODEL_DIR, "symptoms.json"))))  # sorted() exactly like Akshat
+    model    = pickle.load(open(os.path.join(MODEL_DIR, "model.pkl"),    "rb"))
+    encoder  = pickle.load(open(os.path.join(MODEL_DIR, "encoder.pkl"),  "rb"))
+    selector = pickle.load(open(os.path.join(MODEL_DIR, "selector.pkl"), "rb"))  # NEW
+    symptoms = json.load(open(os.path.join(MODEL_DIR, "symptoms.json")))          # NOT sorted anymore
     diseases = json.load(open(os.path.join(MODEL_DIR, "diseases.json")))
+    severity_map = json.load(open(os.path.join(MODEL_DIR, "severity.json")))      # NEW
 
-    logger.info(f"✅ model.pkl    loaded")
-    logger.info(f"✅ encoder.pkl  loaded")
+    logger.info(f"✅ model.pkl     loaded")
+    logger.info(f"✅ encoder.pkl   loaded")
+    logger.info(f"✅ selector.pkl  loaded")
     logger.info(f"✅ symptoms.json loaded — {len(symptoms)} symptoms")
-    logger.info(f"✅ diseases.json loaded — {len(diseases)} diseases")
+    logger.info(f"✅ severity.json loaded — {len(severity_map)} weights")
     MODEL_LOADED = True
 
 except Exception as e:
     logger.error(f"❌ Startup load error: {e}")
-    model = encoder = symptoms = diseases = None
+    model = encoder = selector = symptoms = diseases = severity_map = None
     MODEL_LOADED = False
 
-# ── Precautions (Akshat's original data) ──────────────────────────────────────
+# ── Precautions (unchanged) ────────────────────────────────────────────────────
 precautions = {
     "Fungal infection":    ["Keep skin clean and dry", "Use antifungal cream", "Avoid sharing personal items", "Wear breathable clothing"],
     "Allergy":             ["Avoid allergens", "Take antihistamines", "Consult a doctor", "Keep windows closed during high pollen"],
@@ -91,7 +93,7 @@ precautions = {
     "Impetigo":            ["Keep sores clean", "Take prescribed antibiotics", "Avoid touching sores", "Wash hands frequently"],
 }
 
-# ── Fallback predictions ───────────────────────────────────────────────────────
+# ── Fallback predictions (unchanged) ──────────────────────────────────────────
 FALLBACK_PREDICTIONS = [
     {"disease": "Viral Fever",  "confidence": 60,
      "description": "Fever caused by viral infection. Rest and hydration recommended.",
@@ -104,28 +106,33 @@ FALLBACK_PREDICTIONS = [
      "precautions": ["Rest", "Stay hydrated", "Take prescribed medication", "Avoid contact with others"]},
 ]
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def symptoms_to_vector(symptom_string):
-    user_symptoms = [s.strip().lower() for s in symptom_string.split(",") if s.strip()]
-    
-    print("User symptoms:", user_symptoms)  # debug
-    
-    vector = np.zeros(len(symptoms), dtype=int)
+    """
+    UPDATED: severity-weighted encoding instead of binary 0/1
+    Also applies selector.transform() before prediction
+    """
+    user_symptoms = [s.strip().lower().replace(' ', '_') for s in symptom_string.split(",") if s.strip()]
+    logger.info(f"User symptoms: {user_symptoms}")
+
+    vec = np.zeros(len(symptoms))
     matched = []
 
-    for i, symptom_col in enumerate(symptoms):
-        if symptom_col.strip().lower() in user_symptoms:
-            vector[i] = 1
-            matched.append(symptom_col)
+    for sym in user_symptoms:
+        if sym in symptoms:
+            idx = symptoms.index(sym)
+            vec[idx] = severity_map.get(sym, 1)   # severity weight instead of 1
+            matched.append(sym)
 
-    print("Matched symptoms:", matched)  # debug
+    logger.info(f"Matched symptoms: {matched}")
 
-    if sum(vector) == 0:
+    if sum(vec) == 0:
         raise ValueError("No valid symptoms matched dataset")
 
-    return vector.reshape(1, -1)
+    # Apply feature selector (NEW — required for new model)
+    vec_sel = selector.transform([vec])
+    return vec_sel
 
 
 def get_disease_description(disease_name):
@@ -153,58 +160,31 @@ def get_precautions(disease_name):
 
 
 def build_predictions(symptom_string):
-    vector = symptoms_to_vector(symptom_string)
+    vector = symptoms_to_vector(symptom_string)   # already selector-transformed
 
-    if hasattr(model, "predict_proba"):
-        proba   = model.predict_proba(vector)[0]
-        classes = model.classes_
-        top_idx = np.argsort(proba)[::-1][:3]
-        results = []
-        for idx in top_idx:
-            disease_name = encoder.inverse_transform([classes[idx]])[0]
-            confidence   = round(float(proba[idx]) * 100, 1)
-            results.append({
-                "disease":     disease_name,
-                "confidence":  confidence,
-                "description": get_disease_description(disease_name),
-                "precautions": get_precautions(disease_name),
-            })
+    proba   = model.predict_proba(vector)[0]
+    top_idx = np.argsort(proba)[::-1][:3]
 
-    elif hasattr(model, "decision_function"):
-        scores  = model.decision_function(vector)[0]
-        classes = model.classes_
-        top_idx = np.argsort(scores)[::-1][:3]
-        results = []
-        for rank, idx in enumerate(top_idx):
-            disease_name = encoder.inverse_transform([classes[idx]])[0]
-            confidence   = round(max(5.0, 85.0 - rank * 20.0), 1)
-            results.append({
-                "disease":     disease_name,
-                "confidence":  confidence,
-                "description": get_disease_description(disease_name),
-                "precautions": get_precautions(disease_name),
-            })
-
-    else:
-        pred         = model.predict(vector)[0]
-        disease_name = encoder.inverse_transform([pred])[0]
-        results = [{
+    results = []
+    for idx in top_idx:
+        disease_name = encoder.classes_[idx]
+        confidence   = round(float(proba[idx]) * 100, 1)
+        results.append({
             "disease":     disease_name,
-            "confidence":  75.0,
+            "confidence":  confidence,
             "description": get_disease_description(disease_name),
             "precautions": get_precautions(disease_name),
-        }]
-
+        })
     return results
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
+# ── Routes (unchanged) ─────────────────────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status":         "ok",
-        "model":          "SVM+DT",
+        "model":          "Ensemble (LinearSVC + RF + ExtraTrees)",
         "model_loaded":   MODEL_LOADED,
         "symptoms_count": len(symptoms) if symptoms else 0
     }), 200
@@ -223,11 +203,11 @@ def predict():
 
         symptoms_input = data.get("symptoms", "")
 
-# Convert list → string (FIX)
         if isinstance(symptoms_input, list):
             symptom_string = ",".join(symptoms_input)
         else:
             symptom_string = str(symptoms_input).strip()
+
         if not symptom_string:
             return jsonify({
                 "status":      "error",
